@@ -1,10 +1,11 @@
 /******************************************************************************/
 /******************     Module for writing .bmp image    		 *************/
 /******************************************************************************/
+`include "parameter.v"
 module image_write
 #(parameter WIDTH 	= 768,							// Image width
 			HEIGHT 	= 512,								// Image height
-			INFILE  = "output.bmp",						// Output image
+			INFILE  = `OUTPUTFILENAME,						// Output image
 			BMP_HEADER_NUM = 54							// Header for bmp image
 )
 (

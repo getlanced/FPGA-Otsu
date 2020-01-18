@@ -1,18 +1,15 @@
 /******************  Module for reading and processing image     **************/
 /******************************************************************************/
-`include "parameter.v" 						// Include definition file
+`include "parameter.v"						// Include definition file
 module image_read
 #(
   parameter WIDTH 	= 768, 					// Image width
 			HEIGHT 	= 512, 						// Image height
-			INFILE  = "kodim23.hex", 	// image file
+			INFILE  = `INPUTFILENAME, 	// image file
 			START_UP_DELAY = 100, 				// Delay during start up time
 			HSYNC_DELAY = 160,					// Delay between HSYNC pulses	
 			VALUE= 100,								// value for Brightness operation
-			THRESHOLD= 90,							// Threshold value for Threshold operation
-			SIGN=0									// Sign value using for brightness operation
-														// SIGN = 0: Brightness subtraction
-														// SIGN = 1: Brightness addition
+			THRESHOLD= 150							// Threshold value for Threshold operation
 )
 (
 	input HCLK,										// clock					
@@ -55,7 +52,7 @@ reg 		ctrl_data_run;					// control signal for data processing
 reg [31 : 0]  in_memory    [0 : sizeOfLengthReal/4]; 	// memory to store  32-bit data image
 reg [7 : 0]   total_memory [0 : sizeOfLengthReal-1];	// memory to store  8-bit data image
 // temporary memory to save image data : size will be WIDTH*HEIGHT*3
-integer temp_BMP   [0 : WIDTH*HEIGHT*3 - 1];			
+integer temp_BMP   [0 : WIDTH*HEIGHT*3 - 1];
 integer org_R  [0 : WIDTH*HEIGHT - 1]; 	// temporary storage for R component
 integer org_G  [0 : WIDTH*HEIGHT - 1];	// temporary storage for G component
 integer org_B  [0 : WIDTH*HEIGHT - 1];	// temporary storage for B component
@@ -64,10 +61,30 @@ integer i, j;
 // temporary signals for calculation: details in the paper.
 integer tempR0,tempR1,tempG0,tempG1,tempB0,tempB1; // temporary variables in contrast and brightness operation
 
-integer value,value1,value2,value4;// temporary variables in invert and threshold operation
+integer value,value1;// temporary variables in invert and threshold operation
 reg [ 9:0] row; // row index of the image
 reg [10:0] col; // column index of the image
 reg [18:0] data_count; // data counting for entire pixels of the image
+
+//For Grayscale mode calculations
+integer gray_pix[0:WIDTH*HEIGHT - 1]; //total value of gray pix
+
+//For Histogram per row
+integer bins[0:254]; //color bin 0-255
+
+//For Otsu's algo
+real mean_left;
+real mean_left_num;
+real mean_right;
+real mean_right_num;
+real weight1;
+real weight2;
+real rpc;
+real lpc;
+integer final_thresh;
+real max_vb;
+real vb;
+integer int_thresh;
 //-------------------------------------------------//
 // -------- Reading data from input file ----------//
 //-------------------------------------------------//
@@ -78,9 +95,9 @@ end
 always@(start) begin
     if(start == 1'b1) begin
         for(i=0; i<WIDTH*HEIGHT*3 ; i=i+1) begin
-            temp_BMP[i] = total_memory[i+0][7:0]; 
+            temp_BMP[i] = total_memory[i+0][7:0];
         end
-        
+		  
         for(i=0; i<HEIGHT; i=i+1) begin
             for(j=0; j<WIDTH; j=j+1) begin
                 org_R[WIDTH*i+j] = temp_BMP[WIDTH*3*(HEIGHT-i-1)+3*j+0]; // save Red component
@@ -88,7 +105,65 @@ always@(start) begin
                 org_B[WIDTH*i+j] = temp_BMP[WIDTH*3*(HEIGHT-i-1)+3*j+2];// save Blue component
             end
         end
-    end
+		  
+		//Get grayscale pixel values 
+		for(i=0; i<(WIDTH*HEIGHT-1) ; i=i+1) begin
+			gray_pix[i]= (org_R[i]+org_G[i]+org_B[i])/3;
+		end
+		
+		//step 1, get histogram values
+		//initialize bins
+		for(i=0; i<255;i=i+1) begin
+			bins[i] =0;
+		end
+		
+		//populate bins
+		for(i=0; i<(WIDTH*HEIGHT-1);i=i+1) begin 
+			bins[gray_pix[i]] = bins[gray_pix[i]] + 1;
+		end
+		
+		//step 2, split histogram to 2 classes based on initialized threshold
+		//Otsu's Method...
+		//mean = (colour*occurence)/pix_count
+		//Weight1 = pix_count_left/pix_count
+		//Weight2 = pix_right_right/pix_count
+		//Between Class Variance = Weight1*Weight2*(mean_left - mean_right)
+		weight1 = 0;
+		weight2 = 0;
+		mean_left = 0;
+		mean_right = 0;
+		final_thresh = 1;
+		max_vb = 0;
+		vb = 0;		
+		//step 3, find optimal threshold
+		for (int_thresh = 1; int_thresh < 254; int_thresh = int_thresh + 1 ) begin //values 1-254 only
+			lpc = 0; rpc = 0; mean_left_num = 0; mean_right_num = 0;
+			//class 1 (Left)
+			for(i = 0;i < int_thresh; i = i+1) begin  //from black to threshold 
+				lpc = lpc + bins[i];
+				mean_left_num = mean_left_num + i*bins[i];
+			end
+			mean_left = mean_left_num /(lpc);
+			
+			//class 2 (right)
+			for(i = int_thresh; i < 255; i = i + 1)begin  //from threshold to white 
+				rpc = rpc + bins[i];
+				mean_right_num = mean_right_num + i*bins[i];
+			end
+			//get total right mean
+			mean_right = mean_right_num/(rpc); //(mean_right/total_right_pix)
+
+			//Verify variance between classes (vb) maximized
+			weight1 = lpc/(WIDTH*HEIGHT);
+			weight2 = rpc/(WIDTH*HEIGHT);
+			
+			vb = weight1*weight2*(mean_left - mean_right)*(mean_left - mean_right);
+			if (vb > max_vb) begin
+				max_vb = vb;
+				final_thresh = int_thresh;
+			end
+		end	
+	end
 end
 //----------------------------------------------------//
 // ---Begin to read image file once reset was high ---//
@@ -226,6 +301,7 @@ assign ctrl_done = (data_count == 196607)? 1'b1: 1'b0; // done flag
 //-------------------------------------------------//
 //-------------  Image processing   ---------------//
 //-------------------------------------------------//
+
 always @(*) begin
 	
 	HSYNC   = 1'b0;
@@ -234,110 +310,42 @@ always @(*) begin
 	DATA_B0 = 0;                                       
 	DATA_R1 = 0;
 	DATA_G1 = 0;
-	DATA_B1 = 0;                                         
+	DATA_B1 = 0;
 	if(ctrl_data_run) begin
 		
 		HSYNC   = 1'b1;
-		`ifdef BRIGHTNESS_OPERATION	
 		/**************************************/		
-		/*		BRIGHTNESS ADDITION OPERATION */
-		/**************************************/
-		if(SIGN == 1) begin
-		// R0
-		tempR0 = org_R[WIDTH * row + col   ] + VALUE;
-		if (tempR0 > 255)
-			DATA_R0 = 255;
-		else
-			DATA_R0 = org_R[WIDTH * row + col   ] + VALUE;
-		// R1	
-		tempR1 = org_R[WIDTH * row + col+1   ] + VALUE;
-		if (tempR1 > 255)
-			DATA_R1 = 255;
-		else
-			DATA_R1 = org_R[WIDTH * row + col+1   ] + VALUE;	
-		// G0	
-		tempG0 = org_G[WIDTH * row + col   ] + VALUE;
-		if (tempG0 > 255)
-			DATA_G0 = 255;
-		else
-			DATA_G0 = org_G[WIDTH * row + col   ] + VALUE;
-		tempG1 = org_G[WIDTH * row + col+1   ] + VALUE;
-		if (tempG1 > 255)
-			DATA_G1 = 255;
-		else
-			DATA_G1 = org_G[WIDTH * row + col+1   ] + VALUE;		
-		// B
-		tempB0 = org_B[WIDTH * row + col   ] + VALUE;
-		if (tempB0 > 255)
-			DATA_B0 = 255;
-		else
-			DATA_B0 = org_B[WIDTH * row + col   ] + VALUE;
-		tempB1 = org_B[WIDTH * row + col+1   ] + VALUE;
-		if (tempB1 > 255)
-			DATA_B1 = 255;
-		else
-			DATA_B1 = org_B[WIDTH * row + col+1   ] + VALUE;
-	end
-	else begin
-	/**************************************/		
-	/*	BRIGHTNESS SUBTRACTION OPERATION */
-	/**************************************/
-		// R0
-		tempR0 = org_R[WIDTH * row + col   ] - VALUE;
-		if (tempR0 < 0)
-			DATA_R0 = 0;
-		else
-			DATA_R0 = org_R[WIDTH * row + col   ] - VALUE;
-		// R1	
-		tempR1 = org_R[WIDTH * row + col+1   ] - VALUE;
-		if (tempR1 < 0)
-			DATA_R1 = 0;
-		else
-			DATA_R1 = org_R[WIDTH * row + col+1   ] - VALUE;	
-		// G0	
-		tempG0 = org_G[WIDTH * row + col   ] - VALUE;
-		if (tempG0 < 0)
-			DATA_G0 = 0;
-		else
-			DATA_G0 = org_G[WIDTH * row + col   ] - VALUE;
-		tempG1 = org_G[WIDTH * row + col+1   ] - VALUE;
-		if (tempG1 < 0)
-			DATA_G1 = 0;
-		else
-			DATA_G1 = org_G[WIDTH * row + col+1   ] - VALUE;		
-		// B
-		tempB0 = org_B[WIDTH * row + col   ] - VALUE;
-		if (tempB0 < 0)
-			DATA_B0 = 0;
-		else
-			DATA_B0 = org_B[WIDTH * row + col   ] - VALUE;
-		tempB1 = org_B[WIDTH * row + col+1   ] - VALUE;
-		if (tempB1 < 0)
-			DATA_B1 = 0;
-		else
-			DATA_B1 = org_B[WIDTH * row + col+1   ] - VALUE;
-	 end
-		`endif
-	
-		/**************************************/		
-		/*		INVERT_OPERATION  			  */
-		/**************************************/
-		`ifdef INVERT_OPERATION	
-			value2 = (org_B[WIDTH * row + col  ] + org_R[WIDTH * row + col  ] +org_G[WIDTH * row + col  ])/3;
-			DATA_R0=255-value2;
-			DATA_G0=255-value2;
-			DATA_B0=255-value2;
-			value4 = (org_B[WIDTH * row + col+1  ] + org_R[WIDTH * row + col+1  ] +org_G[WIDTH * row + col+1  ])/3;
-			DATA_R1=255-value4;
-			DATA_G1=255-value4;
-			DATA_B1=255-value4;		
-		`endif
-		/**************************************/		
-		/********THRESHOLD OPERATION  *********/
+		/********OTSU THRESHOLD OPERATION******/
 		/**************************************/
 		`ifdef THRESHOLD_OPERATION
-
-		value = (org_R[WIDTH * row + col   ]+org_G[WIDTH * row + col   ]+org_B[WIDTH * row + col   ])/3;
+		value = gray_pix[WIDTH * row + col];
+		if(value > final_thresh) begin
+			DATA_R0=255;
+			DATA_G0=255;
+			DATA_B0=255;
+		end
+		else begin
+			DATA_R0=0;
+			DATA_G0=0;
+			DATA_B0=0;
+		end
+		value1 = gray_pix[WIDTH * row + col+1];
+		if(value1 > final_thresh) begin
+			DATA_R1=255;
+			DATA_G1=255;
+			DATA_B1=255;
+		end
+		else begin
+			DATA_R1=0;
+			DATA_G1=0;
+			DATA_B1=0;
+		end
+		`endif
+/**************************************/		
+/*******FIXED THRESHOLD OPERATION******/
+/**************************************/
+		`ifdef FIXED_THRESHOLD_OPERATION
+		value = gray_pix[WIDTH * row + col];
 		if(value > THRESHOLD) begin
 			DATA_R0=255;
 			DATA_G0=255;
@@ -348,7 +356,7 @@ always @(*) begin
 			DATA_G0=0;
 			DATA_B0=0;
 		end
-		value1 = (org_R[WIDTH * row + col+1   ]+org_G[WIDTH * row + col+1   ]+org_B[WIDTH * row + col+1   ])/3;
+		value1 = gray_pix[WIDTH * row + col+1];
 		if(value1 > THRESHOLD) begin
 			DATA_R1=255;
 			DATA_G1=255;
@@ -358,9 +366,8 @@ always @(*) begin
 			DATA_R1=0;
 			DATA_G1=0;
 			DATA_B1=0;
-		end		
+		end
 		`endif
-		
 	end
 end
 

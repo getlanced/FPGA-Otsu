@@ -2,7 +2,7 @@
 /**************************************************************************/
 /******************** Testbench for simulation ****************************/
 /**************************************************************************/
-// `include "parameter.v"				// include definition file
+`include "parameter.v"				// include definition file
 
 module tb_simulation;
 
